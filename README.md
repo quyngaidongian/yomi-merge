@@ -132,3 +132,35 @@ The primary use case is building high-quality bilingual Yomitan dictionaries whe
 * `Dict2` provides rich, human-readable definitions in another language (E.g: dictionaries converted from MDX or DSL using [pyglossary](https://github.com/ilius/pyglossary)).
 
 The tool is not intended for creating dictionaries from scratch or for languages that require complex script-specific processing without a suitable `Dict1`.
+
+## Definition Normalization (`normalize_definitions`)
+
+The function `normalize_definitions` is responsible for transforming raw definition text extracted from Dict2 into a clean, consistent format suitable for display in Yomitan.
+
+`Dict2` is typically converted from other dictionary formats such as MDX or DSL using pyglossary. As a result, its definitions often contain artifacts such as leading part-of-speech markers, numbering schemes, inline abbreviations, or formatting conventions that are not ideal for Yomitan’s popup display.
+
+This function acts as a normalization layer between raw converted data and the final dictionary output.
+
+During the indexing phase of `Dict2`, raw definition strings are collected for each term. These raw definitions are then passed through `normalize_definitions` before being merged into Dict1 entries.
+
+Only the definition field (index 5 of a Yomitan term entry) is affected. All grammatical metadata such as POS tags, deinflection rules, and sequence numbers are preserved from Dict1 and are not inferred or modified based on Dict2 content.
+
+### Design Constraints
+
+`normalize_definitions` is intentionally designed to be conservative and language-agnostic by default.
+
+It does not attempt to infer parts of speech, grammatical structure, or semantic grouping beyond simple text normalization. This is a deliberate choice to avoid introducing incorrect linguistic assumptions, especially when working across multiple languages or dictionary sources.
+
+More aggressive normalization, such as POS-aware splitting or language-specific restructuring, should be implemented as separate, optional logic layered on top of this function.
+
+### Typical Normalization Tasks
+
+Depending on the source dictionary, normalization may include removing leading POS markers such as “n.” or “v.”, trimming redundant whitespace, collapsing multiple spaces, stripping numbering prefixes, or splitting compound definition strings into multiple displayable senses.
+
+The exact behavior is expected to vary between dictionary sources. For this reason, `normalize_definitions` is treated as a customizable component rather than a fixed algorithm.
+
+### Extensibility
+
+The function is written to be easily replaced or extended.
+
+If different dictionaries require different normalization strategies, this function can be rewritten or parameterized without affecting the rest of the pipeline. The surrounding code assumes only that the function returns a list of clean definition strings.
