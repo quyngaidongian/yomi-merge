@@ -97,6 +97,16 @@ def parse_args():
         action="store_true",
         help="Do not create zip file (leave output directory only)"
     )
+    parser.add_argument(
+        "--no-normalize",
+        action="store_true",
+        help="Disable definition normalization (use raw definitions from Dict2)"
+    )
+    parser.add_argument(
+        "--copy-reading",
+        action="store_true",
+        help="Copy reading (index 1) from Dict1 when building Dict2-only entries"
+    )
 
 
 
@@ -214,52 +224,47 @@ def is_non_lemma(entry):
     """
     return entry[2] == "non-lemma"
 
-def get_non_lemma_target(entry):
-    """
-    Get lemma target term from a non-lemma entry.
-
-    Assumes entry is non-lemma.
-
-    Example structure:
-    entry[5] == [
-        ["abolish", ["past", "participle"]]
-    ]
-    """
-    try:
-        return entry[5][0][0]
-    except (IndexError, TypeError):
-        raise ValueError(f"Invalid non-lemma definition structure: {entry}")
-
 def index_dict1(dict1_files):
     """
-    Build lemma and non-lemma index for Dict1.
+    Build indexes for Dict1.
 
     Returns:
         lemma_index: dict[str, list[entry]]
         nonlemma_index: dict[str, list[entry]]
+        nonlemma_by_term: dict[str, entry]
+        lemma_of_term: dict[str, str]
     """
     lemma_index = {}
     nonlemma_index = {}
+    nonlemma_by_term = {}
+    lemma_of_term = {}
 
     for entry, _src in iter_dict1_entries(dict1_files):
         term = entry[0]
 
         if is_non_lemma(entry):
-            # non-lemma: redirect target is the lemma
-            lemma_target = get_non_lemma_target(entry)
+            # entry[5] = [[lemma, [tags...]]]
+            redirect = entry[5][0][0]
+            lemma = redirect
 
-            if lemma_target not in nonlemma_index:
-                nonlemma_index[lemma_target] = []
-            nonlemma_index[lemma_target].append(entry)
+            nonlemma_index.setdefault(lemma, []).append(entry)
+            nonlemma_by_term[term] = entry
+            lemma_of_term[term] = lemma
         else:
-            # lemma entry
-            if term not in lemma_index:
-                lemma_index[term] = []
-            lemma_index[term].append(entry)
+            lemma = term
+            lemma_index.setdefault(lemma, []).append(entry)
+            lemma_of_term[term] = lemma
 
-    return lemma_index, nonlemma_index
+    return (
+        lemma_index,
+        nonlemma_index,
+        nonlemma_by_term,
+        lemma_of_term,
+    )
 
-def index_dict2(dict2_files):
+
+def index_dict2(dict2_files, normalize=True):
+
     """
     Build lemma set and normalized definition map for Dict2.
 
@@ -277,75 +282,91 @@ def index_dict2(dict2_files):
             continue
 
         raw_definitions = entry[5]
-        normalized = normalize_definitions(raw_definitions, term)
+
+        if normalize:
+            definitions = normalize_definitions(raw_definitions, term)
+        else:
+            definitions = list(raw_definitions)
 
         dict2_lemmas.add(term)
-        dict2_definitions[term] = normalized
+        dict2_definitions[term] = definitions
 
     return dict2_lemmas, dict2_definitions
 
-def select_valid_lemmas(lemma_index, dict2_lemmas):
+
+def merge_entries_from_dict2(
+    dict2_lemmas,
+    dict2_definitions,
+    lemma_index,
+    nonlemma_by_term,
+    lemma_of_term,
+    copy_reading=False,
+):
     """
-    Select lemmas that exist in both Dict1 and Dict2.
+    Build merged entries driven by Dict2 terms.
 
     Args:
-        lemma_index: dict[str, list[entry]] from Dict1
-        dict2_lemmas: set[str] from Dict2
-
-    Returns:
-        set[str]: valid lemmas for output
-    """
-    return set(lemma_index.keys()) & dict2_lemmas
-
-def merge_lemma_entries(valid_lemmas, lemma_index, dict2_definitions):
-    """
-    Merge lemma entries from Dict1 with definitions from Dict2.
-
-    Args:
-        valid_lemmas: set[str]
-        lemma_index: dict[str, list[entry]]
+        dict2_lemmas: set[str]
         dict2_definitions: dict[str, list[str]]
+        lemma_index: dict[str, list[entry]]
+        nonlemma_by_term: dict[str, entry]
+        lemma_of_term: dict[str, str]
+        copy_reading: bool
 
     Returns:
-        list[list]: merged lemma entries
+        list[entry]
     """
-    merged = []
+    merged_entries = []
 
-    for lemma in sorted(valid_lemmas):
-        dict1_entries = lemma_index.get(lemma, [])
-        definitions = dict2_definitions[lemma]
+    for term in sorted(dict2_lemmas):
+        definitions = dict2_definitions[term]
 
-        for entry in dict1_entries:
-            # Shallow copy is sufficient (we overwrite definitions)
-            new_entry = list(entry)
-            new_entry[5] = definitions
-            merged.append(new_entry)
-
-    return merged
-
-def merge_nonlemma_entries(valid_lemmas, nonlemma_index):
-    """
-    Collect non-lemma entries whose lemma target exists in valid_lemmas.
-
-    Args:
-        valid_lemmas: set[str]
-        nonlemma_index: dict[str, list[entry]]
-
-    Returns:
-        list[list]: merged non-lemma entries
-    """
-    merged = []
-
-    for lemma in sorted(valid_lemmas):
-        entries = nonlemma_index.get(lemma)
-        if not entries:
+        # Case 1: term is lemma in Dict1
+        if term in lemma_index:
+            for entry in lemma_index[term]:
+                new_entry = list(entry)
+                new_entry[5] = definitions
+                merged_entries.append(new_entry)
             continue
 
-        for entry in entries:
-            # Shallow copy to avoid mutating Dict1 data
-            merged.append(list(entry))
+        # Case 2: term is non-lemma in Dict1 AND redirect target exists in Dict2
+        if term in nonlemma_by_term:
+            nonlemma_entry = nonlemma_by_term[term]
+            redirect_target = nonlemma_entry[5][0][0]
 
-    return merged
+            if redirect_target in dict2_lemmas:
+                new_entry = list(nonlemma_entry)
+                new_entry[5] = definitions
+                merged_entries.append(new_entry)
+                continue
+            # else: redirect target missing → fall through to Dict2-only
+
+        # Case 3: Dict2-only entry
+        reading = ""
+
+        if copy_reading:
+            # Priority 1: non-lemma Dict1 with same term
+            if term in nonlemma_by_term:
+                reading = nonlemma_by_term[term][1]
+            else:
+                # Priority 2: lemma Dict1
+                lemma = lemma_of_term.get(term)
+                if lemma and lemma in lemma_index:
+                    reading = lemma_index[lemma][0][1]
+
+        entry = [
+            term,           # term
+            reading,        # reading
+            "",             # tags
+            "",             # rules / POS
+            0,              # score
+            definitions,    # definitions
+            0,              # sequence
+            "",             # term tags
+        ]
+        merged_entries.append(entry)
+
+    return merged_entries
 
 def chunk_entries(entries, chunk_size=10_000):
     """
@@ -483,6 +504,20 @@ def validate_output_directory(output_dir):
                     f"Invalid JSON file: {path.name} ({e})"
                 )
 
+def sanity_check_redirects(entries):
+    """
+    Ensure all non-lemma redirects point to existing terms.
+    """
+    terms = {entry[0] for entry in entries}
+
+    for entry in entries:
+        if entry[2] == "non-lemma":
+            redirect_target = entry[5][0][0]
+            if redirect_target not in terms:
+                raise ValueError(
+                    f"Invalid redirect: '{entry[0]}' → '{redirect_target}'"
+                )
+
 def cleanup_output_dir(output_dir):
     """
     Remove all files in output directory before building.
@@ -512,33 +547,34 @@ def main():
     # --------------------------------------------------
     # Phase 1: Load & index Dict1
     # --------------------------------------------------
-    lemma_index, nonlemma_index = index_dict1(dict1_files)
+    (
+        lemma_index,
+        nonlemma_index,
+        nonlemma_by_term,
+        lemma_of_term,
+    ) = index_dict1(dict1_files)
+
 
     # --------------------------------------------------
     # Phase 2: Load & index Dict2 (definitions only)
     # --------------------------------------------------
-    dict2_lemmas, dict2_definitions = index_dict2(dict2_files)
-
-    # --------------------------------------------------
-    # Phase 3: Select valid lemmas & merge
-    # --------------------------------------------------
-    valid_lemmas = select_valid_lemmas(lemma_index, dict2_lemmas)
-
-    merged_lemma_entries = merge_lemma_entries(
-        valid_lemmas,
-        lemma_index,
-        dict2_definitions
+    dict2_lemmas, dict2_definitions = index_dict2(
+        dict2_files,
+        normalize=not args.no_normalize
     )
 
-    merged_nonlemma_entries = merge_nonlemma_entries(
-        valid_lemmas,
-        nonlemma_index
+    ## 3.x – Dict2-driven merge
+
+    all_merged_entries = merge_entries_from_dict2(
+        dict2_lemmas=dict2_lemmas,
+        dict2_definitions=dict2_definitions,
+        lemma_index=lemma_index,
+        nonlemma_by_term=nonlemma_by_term,
+        lemma_of_term=lemma_of_term,
+        copy_reading=args.copy_reading,
     )
 
-    # --------------------------------------------------
-    # Phase 4: Chunk & write term banks
-    # --------------------------------------------------
-    all_merged_entries = merged_lemma_entries + merged_nonlemma_entries
+    sanity_check_redirects(all_merged_entries)
 
     chunks = list(
         chunk_entries(
@@ -546,6 +582,9 @@ def main():
             chunk_size=args.chunk_size
         )
     )
+
+    print("Total merged entries:", len(all_merged_entries))
+    print("Total term_bank files:", len(chunks))
 
     write_term_banks(chunks, args.output)
 

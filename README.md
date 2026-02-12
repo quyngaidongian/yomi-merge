@@ -74,7 +74,7 @@ which can be imported directly into Yomitan.
 
 ## Command-line Options
 
-### --chunk-size
+### `--chunk-size`
 
 Controls the maximum number of entries per `term_bank` file.
 
@@ -84,7 +84,7 @@ Controls the maximum number of entries per `term_bank` file.
 
 The default value is 10000. Smaller values produce more files and may improve import stability for very large dictionaries.
 
-### --title
+### `--title`
 
 Overrides the dictionary title in the generated index.json.
 
@@ -94,7 +94,7 @@ Overrides the dictionary title in the generated index.json.
 
 Only the title field is overridden. All other metadata follows the merge rules.
 
-### --no-zip
+### `--no-zip`
 
 Prevents creation of the zip file. Only the output directory is generated.
 
@@ -103,6 +103,16 @@ Prevents creation of the zip file. Only the output directory is generated.
 ```
 
 This option is useful for debugging, inspecting JSON output, or performing additional processing before packaging.
+
+### `--no-normalize`
+
+Disable definition normalization (use raw definitions from Dict2). By default, the tool normalizes definition text by removing leading term repetition, removing simple POS markers, and splitting by semicolon.
+
+```bash
+--no-normalize
+```
+
+This option is useful for dictionaries that require more aggressive normalization, such as dictionaries converted from MDX or DSL using [pyglossary](https://github.com/ilius/pyglossary).
 
 ## Pre-import Validation
 
