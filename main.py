@@ -15,22 +15,26 @@ POS_PREFIX_RE = re.compile(
     re.IGNORECASE
 )
 
+LEMMA_BLOCK_RE = re.compile(r"(\{[^}]+\})")
+
 # TODO: language-specific POS stripping (vi-en dictionaries)
+
+BRACE_BLOCK_RE = re.compile(r"(\s*\{[^}]+\})")
 
 def normalize_definitions(
     raw_definitions,
     term,
     lang="auto",
-    source="dict2"
+    source="dict2",
 ):
     """
-    Normalize raw definitions from Dict2 into list[str].
+    Normalize raw definitions from Dict2.
 
-    Default behavior (safe):
+    Applied rules:
     - Ensure list[str]
     - Strip leading term repetition
-    - Strip simple POS markers (n., v., adj., ...)
-    - Split by ';'
+    - Replace ', (' with '\\n('
+    - Split multiple {...} blocks onto separate lines
     """
 
     if not raw_definitions:
@@ -40,24 +44,43 @@ def normalize_definitions(
 
     for item in raw_definitions:
         if not isinstance(item, str):
-            # Unexpected structure → stringify safely
             text = str(item)
         else:
             text = item
 
         text = text.strip()
 
-        # Remove leading term repetition (e.g. "lead n. ...")
+        # Remove leading term repetition (very conservative)
         if text.lower().startswith(term.lower()):
             text = text[len(term):].lstrip(" .:-")
 
-        # Remove POS prefix (very conservative)
-        text = POS_PREFIX_RE.sub("", text)
+        # Rule 1: ", (" → newline
+        text = text.replace(", (", "\n(")
 
-        # Split by semicolon
-        parts = [p.strip() for p in text.split(";") if p.strip()]
+        # Rule 2: split multiple {...} blocks onto new lines
+        parts = BRACE_BLOCK_RE.split(text)
 
-        normalized.extend(parts)
+        rebuilt_lines = []
+        current = ""
+
+        for part in parts:
+            if not part:
+                continue
+
+            if part.startswith("{"):
+                if current:
+                    rebuilt_lines.append(current.strip())
+                current = part.strip()
+            else:
+                if current:
+                    current += part
+                else:
+                    current = part.strip()
+
+        if current:
+            rebuilt_lines.append(current.strip())
+
+        normalized.extend(rebuilt_lines)
 
     return normalized
 
@@ -244,7 +267,11 @@ def index_dict1(dict1_files):
 
         if is_non_lemma(entry):
             # entry[5] = [[lemma, [tags...]]]
-            redirect = entry[5][0][0]
+            try:
+                redirect = entry[5][0][0]
+            except Exception:
+                raise ValueError(f"Invalid non-lemma structure: {entry}")
+
             lemma = redirect
 
             nonlemma_index.setdefault(lemma, []).append(entry)
@@ -264,9 +291,8 @@ def index_dict1(dict1_files):
 
 
 def index_dict2(dict2_files, normalize=True):
-
     """
-    Build lemma set and normalized definition map for Dict2.
+    Build lemma set and definition map for Dict2.
 
     Returns:
         dict2_lemmas: set[str]
@@ -277,10 +303,6 @@ def index_dict2(dict2_files, normalize=True):
 
     for entry in iter_dict2_entries(dict2_files):
         term = entry[0]
-
-        if term in dict2_lemmas:
-            continue
-
         raw_definitions = entry[5]
 
         if normalize:
@@ -288,11 +310,14 @@ def index_dict2(dict2_files, normalize=True):
         else:
             definitions = list(raw_definitions)
 
-        dict2_lemmas.add(term)
-        dict2_definitions[term] = definitions
+        if term in dict2_definitions:
+            # Merge definitions instead of dropping
+            dict2_definitions[term].extend(definitions)
+        else:
+            dict2_lemmas.add(term)
+            dict2_definitions[term] = definitions
 
     return dict2_lemmas, dict2_definitions
-
 
 def merge_entries_from_dict2(
     dict2_lemmas,
@@ -303,25 +328,14 @@ def merge_entries_from_dict2(
     copy_reading=False,
 ):
     """
-    Build merged entries driven by Dict2 terms.
-
-    Args:
-        dict2_lemmas: set[str]
-        dict2_definitions: dict[str, list[str]]
-        lemma_index: dict[str, list[entry]]
-        nonlemma_by_term: dict[str, entry]
-        lemma_of_term: dict[str, str]
-        copy_reading: bool
-
-    Returns:
-        list[entry]
+    Build merged entries driven strictly by Dict2 terms.
     """
     merged_entries = []
 
     for term in sorted(dict2_lemmas):
         definitions = dict2_definitions[term]
 
-        # Case 1: term is lemma in Dict1
+        # Case 1: term is lemma in Dict1 → merge Dict1 metadata
         if term in lemma_index:
             for entry in lemma_index[term]:
                 new_entry = list(entry)
@@ -329,44 +343,64 @@ def merge_entries_from_dict2(
                 merged_entries.append(new_entry)
             continue
 
-        # Case 2: term is non-lemma in Dict1 AND redirect target exists in Dict2
+        # Case 2: term is non-lemma in Dict1 → keep Dict2 as-is
         if term in nonlemma_by_term:
-            nonlemma_entry = nonlemma_by_term[term]
-            redirect_target = nonlemma_entry[5][0][0]
-
-            if redirect_target in dict2_lemmas:
-                new_entry = list(nonlemma_entry)
-                new_entry[5] = definitions
-                merged_entries.append(new_entry)
-                continue
-            # else: redirect target missing → fall through to Dict2-only
+            entry = [
+                term,           # term
+                "",             # reading
+                "",             # tags
+                "",             # rules
+                0,              # score
+                definitions,    # definitions
+                0,              # sequence
+                "",             # term tags
+            ]
+            merged_entries.append(entry)
+            continue
 
         # Case 3: Dict2-only entry
         reading = ""
 
         if copy_reading:
-            # Priority 1: non-lemma Dict1 with same term
+            # Priority 1: same-term non-lemma in Dict1
             if term in nonlemma_by_term:
                 reading = nonlemma_by_term[term][1]
             else:
-                # Priority 2: lemma Dict1
+                # Priority 2: lemma in Dict1
                 lemma = lemma_of_term.get(term)
                 if lemma and lemma in lemma_index:
                     reading = lemma_index[lemma][0][1]
 
         entry = [
-            term,           # term
-            reading,        # reading
-            "",             # tags
-            "",             # rules / POS
-            0,              # score
-            definitions,    # definitions
-            0,              # sequence
-            "",             # term tags
+            term,
+            reading,
+            "",
+            "",
+            0,
+            definitions,
+            0,
+            "",
         ]
         merged_entries.append(entry)
 
     return merged_entries
+
+def collect_nonlemma_redirects(nonlemma_index, dict2_lemmas):
+    """
+    Collect Dict1 non-lemma entries whose redirect target exists in Dict2.
+    Used only to support deinflection.
+    """
+    redirects = []
+
+    for lemma, nonlemmas in nonlemma_index.items():
+        if lemma not in dict2_lemmas:
+            continue
+
+        for entry in nonlemmas:
+            redirects.append(list(entry))
+
+    return redirects
+
 
 def chunk_entries(entries, chunk_size=10_000):
     """
@@ -507,16 +541,37 @@ def validate_output_directory(output_dir):
 def sanity_check_redirects(entries):
     """
     Ensure all non-lemma redirects point to existing terms.
+
+    Assumes:
+    - Only Dict1 non-lemma entries have entry[2] == "non-lemma"
+    - entry[5] schema for non-lemma: [[lemma, [tags...]]]
     """
     terms = {entry[0] for entry in entries}
 
     for entry in entries:
-        if entry[2] == "non-lemma":
-            redirect_target = entry[5][0][0]
-            if redirect_target not in terms:
-                raise ValueError(
-                    f"Invalid redirect: '{entry[0]}' → '{redirect_target}'"
-                )
+        if entry[2] != "non-lemma":
+            continue
+
+        # Validate redirect structure safely
+        redirects = entry[5]
+        if (
+            not isinstance(redirects, list)
+            or not redirects
+            or not isinstance(redirects[0], list)
+            or len(redirects[0]) < 1
+            or not isinstance(redirects[0][0], str)
+        ):
+            raise ValueError(
+                f"Invalid non-lemma redirect structure for '{entry[0]}': {entry[5]}"
+            )
+
+        redirect_target = redirects[0][0]
+
+        if redirect_target not in terms:
+            raise ValueError(
+                f"Invalid redirect: '{entry[0]}' → '{redirect_target}'"
+            )
+
 
 def cleanup_output_dir(output_dir):
     """
@@ -565,25 +620,33 @@ def main():
 
     ## 3.x – Dict2-driven merge
 
-    all_merged_entries = merge_entries_from_dict2(
-        dict2_lemmas=dict2_lemmas,
-        dict2_definitions=dict2_definitions,
-        lemma_index=lemma_index,
-        nonlemma_by_term=nonlemma_by_term,
-        lemma_of_term=lemma_of_term,
+    merged_entries = merge_entries_from_dict2(
+        dict2_lemmas,
+        dict2_definitions,
+        lemma_index,
+        nonlemma_by_term,
+        lemma_of_term,
         copy_reading=args.copy_reading,
     )
 
-    sanity_check_redirects(all_merged_entries)
+    nonlemma_redirects = collect_nonlemma_redirects(
+        nonlemma_index,
+        dict2_lemmas,
+    )
+
+    all_entries = merged_entries + nonlemma_redirects
+    all_entries.sort(key=lambda e: e[0])
+
+    sanity_check_redirects(all_entries)
 
     chunks = list(
         chunk_entries(
-            all_merged_entries,
+            all_entries,
             chunk_size=args.chunk_size
         )
     )
 
-    print("Total merged entries:", len(all_merged_entries))
+    print("Total merged entries:", len(all_entries))
     print("Total term_bank files:", len(chunks))
 
     write_term_banks(chunks, args.output)
@@ -601,7 +664,7 @@ def main():
     )
 
     # --------------------------------------------------
-    # Phase 7: Pre-import validation
+    # Pre-import validation
     # --------------------------------------------------
     validate_output_directory(args.output)
 
