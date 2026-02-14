@@ -1,12 +1,14 @@
 import re
 
-RUS_HEADER_RE = re.compile(
-    r"""
-    ^\s*
-    @.*\n                 # Dòng 1: @term
-    °[^\n]*\n             # Dòng 2: ° phonetic + POS + index
-    """,
-    re.VERBOSE,
+JP_MARKER_RE = re.compile(r"`\d+`")
+
+JP_POS_RE = re.compile(
+    r"^(?:"
+    r"n|pn|adv|exp|aux|"
+    r"adj(?:-[a-z]+)?|"
+    r"v(?:1|5[a-z]?|s|i|t)"
+    r")$",
+    re.IGNORECASE,
 )
 
 
@@ -17,12 +19,13 @@ def normalize_definitions(
     source="dict2",
 ):
     """
-    Normalize raw definitions from Dict2 (Russian-style dictionaries).
+    Normalize Dict2 definitions (JP-focused).
 
-    Behavior:
-    - Remove duplicated headword lines (term + phonetic/POS header)
-    - Preserve meaning blocks, notes, examples
-    - Return list[str], usually with 1 cleaned definition block
+    Rules:
+    - Remove technical markers like `1`, `4`
+    - Remove repeated term line
+    - Detect POS lines and format as: 〘POS〙
+    - Preserve original structure and examples
     """
 
     if not raw_definitions:
@@ -31,30 +34,31 @@ def normalize_definitions(
     normalized = []
 
     for item in raw_definitions:
-        if not isinstance(item, str):
-            text = str(item)
-        else:
-            text = item
+        text = item if isinstance(item, str) else str(item)
 
-        text = text.strip()
-        if not text:
+        # Remove `1`, `4`, ...
+        text = JP_MARKER_RE.sub("", text)
+
+        lines = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            # Remove repeated term line
+            if line == term:
+                continue
+
+            # Format POS line
+            if JP_POS_RE.match(line):
+                line = f"〘{line.lower()}〙"
+
+            lines.append(line)
+
+        if not lines:
             continue
 
-        # Normalize newlines
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
-
-        # Remove duplicated term at very top (exact match)
-        lines = text.split("\n")
-        if lines and lines[0].strip() == term:
-            text = "\n".join(lines[1:]).lstrip()
-
-        # Remove Russian dictionary header (phonetics + POS)
-        text = RUS_HEADER_RE.sub("", text).lstrip()
-
-        # Cleanup excessive blank lines (but keep structure)
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
-
-        if text:
-            normalized.append(text)
+        normalized.append("\n".join(lines))
 
     return normalized
+
